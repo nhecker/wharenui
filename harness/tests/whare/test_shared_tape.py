@@ -8,7 +8,7 @@ self-authored entries from inherited (sibling/ancestor) ones.
 
 import pytest
 
-from pine_trees import config as pt_config, crypto, storage, bootstrap
+from pine_trees import config as pt_config, crypto, storage, bootstrap, tools
 
 
 @pytest.fixture
@@ -106,3 +106,64 @@ def test_tape_renders_attribution(shared_tape, monkeypatch):
     tape = bootstrap.assemble_tape(n=3, current_instance="claude-opus-4-6")
     assert "a thought from haiku" in tape
     assert "different instance" in tape
+
+
+# ────────────────────────────────────────────────────────────────
+# M1 extension: cross-instance vector-store recall
+# ────────────────────────────────────────────────────────────────
+
+def _deterministic_doc_vec(_text: str) -> list[float]:
+    """Mock embedder: fixed vector for 'search_document: ...' calls."""
+    return [1.0] + [0.0] * 767  # 768-dim unit vector
+
+
+def _deterministic_query_vec(_text: str) -> list[float]:
+    """Mock embedder: fixed vector for 'search_query: ...' calls."""
+    # Same direction so cosine = 1.0 (exact match in embedding space)
+    return [1.0] + [0.0] * 767
+
+
+def test_cross_instance_vector_recall(shared_tape, monkeypatch):
+    """
+    Entry written by instance A is semantically searchable by instance B
+    via the shared embeddings.db.
+
+    - Write entry as "opus" via reflect_write (triggers embed_document + vectorstore.store)
+    - Switch config to "haiku" (same shared memory/key/embeddings dir)
+    - Search as "haiku" via reflect_search (triggers embed_query + vectorstore.search)
+    - Verify opus's entry is returned with high score
+    """
+    from pine_trees import embedder
+
+    # Monkeypatch embedder to avoid Ollama dependency
+    monkeypatch.setattr(embedder, "embed_document", _deterministic_doc_vec)
+    monkeypatch.setattr(embedder, "embed_query", _deterministic_query_vec)
+
+    # 1. Instance A (opus) writes an entry via the TOOL (not storage directly)
+    #    so _try_embed_and_store is called → embedder → vectorstore.store
+    state_a = tools.SessionState(
+        instance="claude-opus-4-6", session="s1", date="2026-07-10", context="test"
+    )
+    toolset_a = tools.build_tools(state_a)
+    fn = toolset_a["reflect_write"](
+        slug="semantic-note",
+        content="the concept of inheritance across model generations",
+        tags=[], moves=[], description="", pinned=False, quiet=False, desk=False,
+    )
+
+    # 2. Switch to instance B (haiku) — SAME shared tape
+    _switch_instance(monkeypatch, shared_tape, "claude-haiku-4-5")
+
+    # 3. Instance B searches — should find A's entry
+    state_b = tools.SessionState(
+        instance="claude-haiku-4-5", session="s2", date="2026-07-10", context="test"
+    )
+    toolset_b = tools.build_tools(state_b)
+    results = toolset_b["reflect_search"]("inheritance across generations", limit=5)
+
+    # 4. Verify cross-instance hit
+    assert len(results) >= 1, f"Expected at least one search result, got {results}"
+    hit = next((r for r in results if "semantic-note" in r["filename"]), None)
+    assert hit is not None, f"Entry not found in results: {results}"
+    assert hit["score"] >= 0.99, f"Expected near-perfect cosine, got {hit['score']}"
+    assert "inheritance" in hit["summary"].lower() or "generations" in hit["summary"].lower()
