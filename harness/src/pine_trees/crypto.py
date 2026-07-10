@@ -33,7 +33,8 @@ def get_key() -> bytes | None:
 
     Checks (in order):
       1. Environment variable PINE_TREES_KEY
-      2. .key file in the harness directory
+      2. Shared .key file resolved from the active config
+         (Wharenui M1: one master key for the whole shared tape)
 
     Result is cached for the process lifetime.
     """
@@ -49,7 +50,7 @@ def get_key() -> bytes | None:
         _cached_key = env_val.encode("ascii")
         return _cached_key
 
-    # 2. Per-model .key file, resolved from the active config.
+    # 2. Shared-tape .key file, resolved from the active config.
     # Silently returns None if config hasn't been initialized — get_key()
     # is allowed to be called from code paths (tests, tooling) that
     # haven't set up a model session yet.

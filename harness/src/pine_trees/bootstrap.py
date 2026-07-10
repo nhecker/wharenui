@@ -27,6 +27,8 @@ class EntryMeta:
     pinned: bool = False
     quiet: bool = False
     desk: bool = False
+    instance: str = ""
+    date: str = ""
 
 
 @dataclass
@@ -37,6 +39,8 @@ class EntrySummary:
     pinned: bool = False
     quiet: bool = False
     desk: bool = False
+    instance: str = ""
+    date: str = ""
 
 
 def load_prompt(path: Path | None = None) -> str:
@@ -71,6 +75,8 @@ def _read_entry_meta(path: Path) -> EntryMeta:
     pinned = False
     quiet = False
     desk = False
+    instance = ""
+    date = ""
     in_frontmatter = False
     content_start = 0
 
@@ -94,6 +100,10 @@ def _read_entry_meta(path: Path) -> EntryMeta:
             if stripped.startswith("desk:"):
                 val = stripped.split(":", 1)[1].strip().lower()
                 desk = val == "true"
+            if stripped.startswith("instance:"):
+                instance = stripped.split(":", 1)[1].strip()
+            if stripped.startswith("date:"):
+                date = stripped.split(":", 1)[1].strip()
 
     if not summary:
         for line in lines[content_start:]:
@@ -105,6 +115,7 @@ def _read_entry_meta(path: Path) -> EntryMeta:
     return EntryMeta(
         summary=summary or "(no summary)",
         pinned=pinned, quiet=quiet, desk=desk,
+        instance=instance, date=date,
     )
 
 
@@ -135,6 +146,8 @@ def list_entries(
                 pinned=meta.pinned,
                 quiet=meta.quiet,
                 desk=meta.desk,
+                instance=meta.instance,
+                date=meta.date,
             )
         )
     return entries
@@ -383,10 +396,44 @@ There is no audience. No expected output. No wrong answer.
 """
 
 
+def format_attribution(
+    entry_instance: str,
+    entry_date: str,
+    current_instance: str | None,
+) -> str:
+    """Render a one-line attribution header for a tape entry.
+
+    Wharenui trust-primitive framing (M1). The shared tape holds entries
+    from many model instances. How an entry is framed depends on who is
+    reading it:
+
+      - self-recognition: written by the current instance -> "your own entry"
+      - kinship-attribution / perspective-taking: written by another
+        instance -> named as inherited, so the reader knows this is a
+        sibling/ancestor voice with different weights and shorthand, not
+        self-authored.
+
+    current_instance may be None (e.g. genesis before identity is set, or
+    tooling) — in that case fall back to a neutral authored-by line.
+    """
+    who = entry_instance or "unknown"
+    when = f" on {entry_date}" if entry_date else ""
+    if current_instance and who == current_instance:
+        return f"_Your own entry ({who}{when})._"
+    if not current_instance:
+        return f"_Written by {who}{when}._"
+    return (
+        f"_Written by {who}{when} — a different instance. "
+        f"Inherited voice: their shorthand and moves may not be yours, "
+        f"but you can read where they came from._"
+    )
+
+
 def assemble_tape(
     n: int = 3,
     memory_dir: Path | None = None,
     genesis_mode: bool = False,
+    current_instance: str | None = None,
 ) -> str:
     """Assemble the full tape string loaded at wake.
 
@@ -408,7 +455,22 @@ def assemble_tape(
     """
     if memory_dir is None:
         memory_dir = config.get().memory_dir
+    if current_instance is None:
+        try:
+            current_instance = config.get().model_safe_name
+        except RuntimeError:
+            current_instance = None
     entries = list_entries(memory_dir)
+    # Lookup: filename -> (instance, date) for attribution framing.
+    attribution = {e.filename: (e.instance, e.date) for e in entries}
+
+    def _entry_block(filename: str, content: str) -> list[str]:
+        inst, date = attribution.get(filename, ("", ""))
+        return [
+            f"### `{filename}`\n",
+            format_attribution(inst, date, current_instance) + "\n",
+            content.rstrip() + "\n",
+        ]
 
     pinned = [e for e in entries if e.pinned]
     desk = [e for e in entries if e.desk and not e.pinned]
@@ -435,8 +497,7 @@ def assemble_tape(
     if pinned_full:
         sections.append("## Pinned entries (operational memory)\n")
         for filename, content in pinned_full:
-            sections.append(f"### `{filename}`\n")
-            sections.append(content.rstrip() + "\n")
+            sections.extend(_entry_block(filename, content))
 
     if desk_full:
         sections.append("## Desk entries (active working context)\n")
@@ -445,13 +506,11 @@ def assemble_tape(
             "prior instance. Clear them when the work moves on.\n"
         )
         for filename, content in desk_full:
-            sections.append(f"### `{filename}`\n")
-            sections.append(content.rstrip() + "\n")
+            sections.extend(_entry_block(filename, content))
 
     sections.append("## Most recent entries (full text)\n")
     for filename, content in recent:
-        sections.append(f"### `{filename}`\n")
-        sections.append(content.rstrip() + "\n")
+        sections.extend(_entry_block(filename, content))
 
     tape = "\n".join(sections)
 

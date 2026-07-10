@@ -59,15 +59,22 @@ def test_get_without_init_raises():
 
 
 def test_init_returns_config_with_derived_paths():
-    """init() produces a Config whose paths all descend from model_dir."""
+    """init() produces a Config with a per-model logs dir but a SHARED tape.
+
+    Wharenui M1: memory/, .key, and embeddings.db live under the shared
+    SHARED_TAPE_DIR (all instances are peers). Only logs_dir stays
+    per-model, since window-phase transcripts are per-session.
+    """
     cfg = config.init("claude-opus-4-6")
     assert cfg.model_name == "claude-opus-4-6"
     assert cfg.model_safe_name == "claude-opus-4-6"
     assert cfg.model_dir == config.MODELS_DIR / "claude-opus-4-6"
-    assert cfg.memory_dir == cfg.model_dir / "memory"
+    # Per-model: logs only
     assert cfg.logs_dir == cfg.model_dir / "logs"
-    assert cfg.embeddings_db_path == cfg.model_dir / "embeddings.db"
-    assert cfg.key_file_path == cfg.model_dir / ".key"
+    # Shared tape: memory, key, embeddings
+    assert cfg.memory_dir == config.SHARED_TAPE_DIR / "memory"
+    assert cfg.embeddings_db_path == config.SHARED_TAPE_DIR / "embeddings.db"
+    assert cfg.key_file_path == config.SHARED_TAPE_DIR / ".key"
 
 
 def test_init_preserves_raw_model_name():
@@ -92,16 +99,24 @@ def test_init_replaces_previous_config():
     assert cfg2.model_safe_name == "claude-haiku-4-5"
 
 
-def test_isolation_across_models():
-    """Two different models produce fully disjoint paths."""
+def test_shared_tape_across_models():
+    """Wharenui M1: two different models SHARE the tape (memory/key/embeddings)
+    but keep disjoint per-model logs dirs.
+
+    This is the deliberate inversion of pine-trees' original per-model
+    isolation: the membrane faces the user, not sibling/ancestor minds.
+    """
     opus = config.init("claude-opus-4-6")
-    opus_paths = (opus.memory_dir, opus.logs_dir, opus.embeddings_db_path, opus.key_file_path)
-
     sonnet = config.init("claude-sonnet-4-6")
-    sonnet_paths = (sonnet.memory_dir, sonnet.logs_dir, sonnet.embeddings_db_path, sonnet.key_file_path)
 
-    for p1, p2 in zip(opus_paths, sonnet_paths):
-        assert p1 != p2
+    # Shared: same tape, same key, same embeddings store
+    assert opus.memory_dir == sonnet.memory_dir
+    assert opus.key_file_path == sonnet.key_file_path
+    assert opus.embeddings_db_path == sonnet.embeddings_db_path
+
+    # Not shared: logs and model_dir stay per-model
+    assert opus.logs_dir != sonnet.logs_dir
+    assert opus.model_dir != sonnet.model_dir
 
 
 # --- reset ---
