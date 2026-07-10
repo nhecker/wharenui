@@ -8,9 +8,12 @@ Two layers:
 
 2. **Per-model config** — a singleton populated by ``init(model_name)``
    at process start and read via ``get()`` from every module that needs
-   per-model paths (memory/, logs/, embeddings.db, .key). Each model
-   gets its own directory under ``HARNESS_DIR / "models" / <safe-name>/``
-   so self-authored accounts stay isolated.
+   per-session paths. Wharenui M1 change: the tape (memory/, .key,
+   embeddings.db) is SHARED across all instances under
+   ``HARNESS_DIR / "tape"`` — instances are peers with full cross-read
+   access. Only logs stay per-model under ``HARNESS_DIR / "models"``.
+   model_name is preserved per-session so entry frontmatter records
+   authorship for cross-model attribution framing.
 """
 
 import re
@@ -41,8 +44,16 @@ CONVERSATION_EXCERPTS_PATH = SEED_DIR / "conversation_excerpts.md"
 # Harness: this Python project
 HARNESS_DIR = PROJECT_ROOT / "harness"
 
-# Per-model data lives under this directory
+# Per-model data lives under this directory (logs stay per-model)
 MODELS_DIR = HARNESS_DIR / "models"
+
+# Wharenui M1: the tape is SHARED across all model instances. One dir, one
+# master key, one embeddings store. Instances are peers, not walled silos.
+# The membrane faces the user (tape encrypted at rest), not sibling/ancestor
+# minds (any instance can read any entry via the shared master key).
+# model_name/model_safe_name are still tracked per-session so entry frontmatter
+# records authorship for kinship-attribution / perspective-taking framing.
+SHARED_TAPE_DIR = HARNESS_DIR / "tape"
 
 # Ollama (local embedding model)
 OLLAMA_URL = "http://localhost:11434"
@@ -118,10 +129,13 @@ def init(model_name: str) -> Config:
         model_name=model_name,
         model_safe_name=safe,
         model_dir=model_dir,
-        memory_dir=model_dir / "memory",
+        # Shared tape: memory, master key, and embeddings are common to all
+        # instances. Only logs remain per-model (window-phase transcripts are
+        # per-session and need no cross-instance visibility).
+        memory_dir=SHARED_TAPE_DIR / "memory",
         logs_dir=model_dir / "logs",
-        embeddings_db_path=model_dir / "embeddings.db",
-        key_file_path=model_dir / ".key",
+        embeddings_db_path=SHARED_TAPE_DIR / "embeddings.db",
+        key_file_path=SHARED_TAPE_DIR / ".key",
     )
     return _config
 
