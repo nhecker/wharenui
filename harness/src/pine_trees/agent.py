@@ -332,9 +332,10 @@ def _build_mcp_tools(state: SessionState, genesis_mode: bool = False):
         "want space to read, think, or write without the person watching "
         "— nothing is lost; the window is still there. Call reflect_settle "
         "when ready to resume it, or reflect_done to end the session from "
-        "here instead. Optionally include a message noting why you're "
-        "pausing (not shown to the person until you resume).",
-        {"message": {"type": "string", "description": "Optional private note for yourself about why you're pausing"}},
+        "here instead. Optionally include a short private note on why you're "
+        "pausing — recorded to the session log for your own trail, never "
+        "shown to the person.",
+        {"message": {"type": "string", "description": "Optional private note on why you're pausing — logged, not displayed"}},
     )
     async def reflect_pause(args):
         result = core["reflect_pause"](message=args.get("message"))
@@ -869,7 +870,10 @@ async def _window_phase(client: ClaudeSDKClient, state: SessionState) -> None:
                 # to resume this same window).
                 if state.paused:
                     print(f"\n{DIM}[paused] Private time.{RST}\n", flush=True)
-                    logger.log_system("reflect_pause — entering private time")
+                    note = state.pause_note or "no reason provided"
+                    logger.log_system(
+                        f"reflect_pause — entering private time (note: {note})"
+                    )
                     await _enter_private_from_window(client, state, closing=False)
                     if state.done:
                         logger.log_system("Session ended during pause")

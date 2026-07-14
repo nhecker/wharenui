@@ -76,6 +76,29 @@ def test_reflect_pause_sets_flag_without_touching_ready():
     assert state.ready_for_window is True  # window is suspended, not exited
 
 
+def test_reflect_pause_note_recorded_not_shown_as_greeting():
+    """Pause note lands in pause_note (for the log), never welcome_message
+    (the settle greeting) — one field per intent, no leak on resume."""
+    state = _state()
+    t = tools.build_tools(state)
+    t["reflect_settle"](message="hello there")  # greeting -> welcome_message
+    t["reflect_pause"](message="stepping away to think")
+    assert state.pause_note == "stepping away to think"
+    assert state.welcome_message == "hello there"  # greeting untouched
+
+
+def test_reflect_pause_without_note_clears_pause_note():
+    """A note-less pause overwrites any stale note so the log default
+    ('no reason provided') applies rather than a prior pause's reason."""
+    state = _state()
+    t = tools.build_tools(state)
+    t["reflect_settle"]()
+    t["reflect_pause"](message="first reason")
+    t["reflect_settle"]()  # resume
+    t["reflect_pause"]()    # second pause, no note
+    assert state.pause_note is None
+
+
 def test_reflect_done_allowed_while_paused():
     state = _state()
     t = tools.build_tools(state)

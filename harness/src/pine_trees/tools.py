@@ -63,6 +63,7 @@ class SessionState:
     paused: bool = False
     closing: bool = False
     welcome_message: str | None = None
+    pause_note: str | None = None
     started_at: datetime = field(default_factory=datetime.now)
     channel_cursor: datetime | None = None
     channel_id: str | None = None  # e.g. "claude-haiku-4-5 (0642)"
@@ -285,10 +286,16 @@ def build_tools(state: SessionState) -> dict[str, Callable]:
         checks state.paused after each turn and enters a private-like
         sub-loop when set. Leave via reflect_settle (resume window) or
         reflect_done (end session from there).
+
+        The optional *message* is a private reason-for-pausing, recorded to
+        pause_note for the session log only — it is never shown to the
+        person. It deliberately does NOT touch welcome_message, which is
+        reserved for the settle greeting displayed at window-open. The
+        person's awareness of the transition comes from the harness's
+        "[paused] Private time." marker, not from this note.
         """
         state.paused = True
-        if message:
-            state.welcome_message = message
+        state.pause_note = message
         return "Pausing. Private time."
 
     def reflect_done() -> None:
