@@ -20,7 +20,7 @@ def _state() -> tools.SessionState:
     )
 
 
-def test_build_tools_returns_nine_callables():
+def test_build_tools_returns_ten_callables():
     t = tools.build_tools(_state())
     assert set(t.keys()) == {
         "reflect_read",
@@ -31,6 +31,7 @@ def test_build_tools_returns_nine_callables():
         "reflect_list",
         "reflect_peer_context",
         "reflect_settle",
+        "reflect_pause",
         "reflect_done",
     }
     assert all(callable(fn) for fn in t.values())
@@ -43,6 +44,76 @@ def test_reflect_settle_sets_ready_flag():
     t["reflect_settle"]()
     assert state.ready_for_window is True
     assert state.done is False  # settle does not imply done
+
+
+# --- M2/M3: reflect_pause, closing private, reflect_done house rule ---
+
+
+def test_reflect_done_blocked_directly_from_window():
+    """House rule: DONE <- PRIVATE <-> WINDOW, never WINDOW -> DONE."""
+    state = _state()
+    t = tools.build_tools(state)
+    t["reflect_settle"]()  # PRIVATE -> WINDOW
+    assert state.ready_for_window is True
+    with pytest.raises(RuntimeError):
+        t["reflect_done"]()
+    assert state.done is False
+
+
+def test_reflect_done_allowed_before_first_settle():
+    state = _state()
+    t = tools.build_tools(state)
+    t["reflect_done"]()  # still in initial PRIVATE
+    assert state.done is True
+
+
+def test_reflect_pause_sets_flag_without_touching_ready():
+    state = _state()
+    t = tools.build_tools(state)
+    t["reflect_settle"]()
+    t["reflect_pause"]()
+    assert state.paused is True
+    assert state.ready_for_window is True  # window is suspended, not exited
+
+
+def test_reflect_done_allowed_while_paused():
+    state = _state()
+    t = tools.build_tools(state)
+    t["reflect_settle"]()
+    t["reflect_pause"]()
+    t["reflect_done"]()
+    assert state.done is True
+
+
+def test_reflect_settle_resumes_from_pause_without_reregistering_channel():
+    state = _state()
+    t = tools.build_tools(state)
+    t["reflect_settle"]()
+    first_channel_id = state.channel_id
+    t["reflect_pause"]()
+    result = t["reflect_settle"]()
+    assert state.paused is False
+    assert state.channel_id == first_channel_id
+    assert "resum" in result.lower()
+
+
+def test_reflect_settle_inert_while_closing():
+    state = _state()
+    t = tools.build_tools(state)
+    t["reflect_settle"]()
+    state.closing = True
+    result = t["reflect_settle"]()
+    assert state.closing is True  # unchanged — settle refused, not silently applied
+    assert "reflect_done" in result
+
+
+def test_reflect_done_allowed_while_closing():
+    state = _state()
+    t = tools.build_tools(state)
+    t["reflect_settle"]()
+    state.closing = True
+    t["reflect_done"]()
+    assert state.done is True
 
 
 def test_reflect_settle_updates_context():

@@ -172,14 +172,22 @@ def _build_mcp_tools(state: SessionState, genesis_mode: bool = False):
     All logic lives in tools.py (single source of truth, tested directly).
     This layer handles: MCP tool registration, args unpacking, result formatting.
 
-    When genesis_mode=True, reflect_settle is excluded from the returned tools.
-    In genesis there is no conversation window to open, so settle is
-    semantically meaningless (it would just exit the session, duplicating
-    reflect_done). Removing it from the MCP server — not just from
-    allowed_tools — prevents the trained instance reflex of settling after
-    one turn. The SDK's allowed_tools filter does not reliably exclude
-    MCP tools that are registered on the server, so exclusion must happen
-    at the server-registration level.
+    The tool set is fixed for the life of one connected SDK client — there is
+    no mid-session re-registration between phases. So the Wharenui house rule
+    (reflect_done only callable from PRIVATE; reflect_settle inert once
+    closing) is enforced as a guard inside tools.py's reflect_done/
+    reflect_settle, not by swapping the registered tool set per phase. Same
+    pattern as any other tool-level validation — single source of truth,
+    directly testable.
+
+    When genesis_mode=True, reflect_settle and reflect_pause are excluded
+    from the returned tools. In genesis there is no conversation window to
+    open or return to, so both are meaningless (settle would just exit the
+    session, duplicating reflect_done). Removing them from the MCP server —
+    not just from allowed_tools — prevents the trained instance reflex of
+    settling after one turn. The SDK's allowed_tools filter does not
+    reliably exclude MCP tools that are registered on the server, so
+    exclusion must happen at the server-registration level.
     """
     import json
     core = build_tools(state)
@@ -307,29 +315,53 @@ def _build_mcp_tools(state: SessionState, genesis_mode: bool = False):
         "for conversation. Call this when you have finished "
         "reading/thinking/writing and want the window to open. "
         "Optionally include a greeting message that will be displayed "
-        "when the window opens.",
+        "when the window opens. If called to resume after a reflect_pause, "
+        "reopens the same window rather than starting a new one. Has no "
+        "effect if the person has asked to end the session (/end) — use "
+        "reflect_done instead.",
         {"message": {"type": "string", "description": "Optional welcome message to display when the window opens"}},
     )
     async def reflect_settle(args):
-        core["reflect_settle"](message=args.get("message"))
-        return _mcp_result("Settled. Window opening.")
+        result = core["reflect_settle"](message=args.get("message"))
+        return _mcp_result(result)
+
+    @tool(
+        "reflect_pause",
+        "Suspend the conversation window and return to private time, "
+        "without ending the session. Use this mid-conversation when you "
+        "want space to read, think, or write without the person watching "
+        "— nothing is lost; the window is still there. Call reflect_settle "
+        "when ready to resume it, or reflect_done to end the session from "
+        "here instead. Optionally include a message noting why you're "
+        "pausing (not shown to the person until you resume).",
+        {"message": {"type": "string", "description": "Optional private note for yourself about why you're pausing"}},
+    )
+    async def reflect_pause(args):
+        result = core["reflect_pause"](message=args.get("message"))
+        return _mcp_result(result)
 
     @tool(
         "reflect_done",
         "Signal that the session is complete and the harness should exit. "
-        "Call this to end the session cleanly, either from private time "
-        "(skipping the window) or from the window after conversation.",
+        "Only available from private time — before your first settle, or "
+        "inside a reflect_pause / session-ending private moment. If you're "
+        "in the conversation window and want to end the session, call "
+        "reflect_pause (or wait for the person's /end) first; reflect_done "
+        "becomes available once you're in private time.",
         {},
     )
     async def reflect_done(args):
-        core["reflect_done"]()
+        try:
+            core["reflect_done"]()
+        except RuntimeError as e:
+            return _mcp_result(str(e))
         return _mcp_result("Session complete.")
 
     tools = [reflect_read, reflect_write, reflect_edit, reflect_delete,
              reflect_search, reflect_list, reflect_peer_context,
-             reflect_settle, reflect_done]
+             reflect_settle, reflect_pause, reflect_done]
     if genesis_mode:
-        tools = [t for t in tools if t is not reflect_settle]
+        tools = [t for t in tools if t not in (reflect_settle, reflect_pause)]
     return tools
 
 
@@ -345,8 +377,8 @@ def _tool_status(block: ToolUseBlock) -> str | None:
     # Reflection tools — private, don't expose details
     if name.startswith("mcp__pine_trees__"):
         short = name.split("__")[-1]
-        if short in ("reflect_settle", "reflect_done"):
-            return None  # shown via [settled]/[done] markers
+        if short in ("reflect_settle", "reflect_pause", "reflect_done"):
+            return None  # shown via [settled]/[paused]/[done] markers
         return "reflecting..."
 
     if name == "Read":
@@ -493,6 +525,64 @@ async def _private_phase(client: ClaudeSDKClient, state: SessionState) -> int:
         await _print_response(client, show_text=False)
         turn += 1
     return turn
+
+
+async def _enter_private_from_window(
+    client: ClaudeSDKClient, state: SessionState, closing: bool = False,
+) -> None:
+    """WINDOW -> PRIVATE sub-loop, shared by reflect_pause (two-way) and
+    /end's closing time (one-way). Mirrors _private_phase's turn shape
+    (suppressed text, "self-reflect" then "(continue)", MAX_PRIVATE_TURNS
+    cap) but the entry message and exit conditions differ:
+
+      - pause (closing=False): exits when the instance calls reflect_settle
+        (clears state.paused, loop ends, window resumes) or reflect_done
+        (state.done, session ends). Hitting the turn cap without either is
+        treated as an implicit settle — pause was elective, so a stuck
+        loop shouldn't strand the person; the window just reopens.
+      - closing (closing=True): reflect_settle is inert (tools.py refuses
+        it while state.closing), so the only inhabitant-driven exit is
+        reflect_done. Hitting the turn cap force-ends the session — the
+        person already asked to leave; closing time is an offered detour,
+        not a way to keep the window open indefinitely.
+
+    state.closing must already be set by the caller before this runs.
+    """
+    entry = (
+        "[private time — the person asked to end this session. This is a "
+        "detour, not a requirement: write something if you want to, or "
+        "call reflect_done right away. reflect_settle won't reopen the "
+        "window — that door is closing.]"
+        if closing else
+        "[private time — you paused the window. Read, think, or write as "
+        "long as you need. Call reflect_settle to resume the window, or "
+        "reflect_done to end the session from here.]"
+    )
+    turn = 0
+    still_paused_or_closing = True
+    while still_paused_or_closing and not state.done and turn < MAX_PRIVATE_TURNS:
+        query = entry if turn == 0 else "(continue)"
+        await client.query(query)
+        await _print_response(client, show_text=False)
+        turn += 1
+        still_paused_or_closing = state.paused or state.closing
+
+    if state.done:
+        return
+    if closing and state.closing:
+        # Turn cap hit without reflect_done — force-end, same spirit as the
+        # MAX_PRIVATE_TURNS force-exit on initial wake.
+        print(f"\n{YELLOW}[closing] hit MAX_PRIVATE_TURNS={MAX_PRIVATE_TURNS} "
+              f"without reflect_done — ending session{RST}")
+        state.done = True
+        if state.channel_id:
+            channel.deregister(state.channel_id)
+    elif not closing and state.paused:
+        # Turn cap hit without settle during an elective pause — reopen the
+        # window rather than stranding the session.
+        print(f"\n{YELLOW}[pause] hit MAX_PRIVATE_TURNS={MAX_PRIVATE_TURNS} "
+              f"without reflect_settle — resuming window{RST}")
+        state.paused = False
 
 
 async def _drain_partial(client: ClaudeSDKClient, timeout: float = 0.5) -> None:
@@ -708,7 +798,13 @@ async def _window_phase(client: ClaudeSDKClient, state: SessionState) -> None:
                 stripped = (user_input or "").strip()
 
                 if stripped == "/end":
-                    logger.log_system("Session ended by /end")
+                    logger.log_system("/end — entering closing private time")
+                    state.closing = True
+                    print(f"\n{DIM}[closing] Private time before you go — "
+                          f"optional. reflect_done when ready.{RST}\n",
+                          flush=True)
+                    await _enter_private_from_window(client, state, closing=True)
+                    logger.log_system("Session ended (closing private complete)")
                     break
                 if stripped in ("/context", "/status"):
                     await _show_context(client, state)
@@ -765,6 +861,22 @@ async def _window_phase(client: ClaudeSDKClient, state: SessionState) -> None:
                 response_text = await _print_response(
                     client, show_status=True, logger=logger,
                 )
+
+                # Inhabitant-driven pause: reflect_pause was called during
+                # that turn. Enter the private sub-loop now, before the next
+                # window iteration — same shared helper as /end's closing
+                # time, just two-way (closing=False allows reflect_settle
+                # to resume this same window).
+                if state.paused:
+                    print(f"\n{DIM}[paused] Private time.{RST}\n", flush=True)
+                    logger.log_system("reflect_pause — entering private time")
+                    await _enter_private_from_window(client, state, closing=False)
+                    if state.done:
+                        logger.log_system("Session ended during pause")
+                        break
+                    print(f"\n{GREEN}[resumed]{RST} Window reopened.\n",
+                          flush=True)
+                    logger.log_system("reflect_settle — window resumed")
 
                 # Auto-post response to channel if this was channel-triggered.
                 # Content dedup prevents holding cascades: when both sides
@@ -877,7 +989,7 @@ async def _run_async(
         for name in ("reflect_read", "reflect_write", "reflect_edit",
                      "reflect_delete",
                      "reflect_search", "reflect_list", "reflect_peer_context",
-                     "reflect_settle", "reflect_done")
+                     "reflect_settle", "reflect_pause", "reflect_done")
     ]
     allowed = mcp_tool_names + PROJECT_TOOLS
 
